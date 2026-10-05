@@ -1,0 +1,39 @@
+<resources>
+    <string name="app_name">APK Repacker</string>
+
+    <string name="select_installed_app">Select Installed App</string>
+    <string name="selected_app">Selected App</string>
+    <string name="original_apk">Original APK</string>
+    <string name="new_package_name">New Package Name</string>
+    <string name="new_package_hint">com.example.modified</string>
+    <string name="analyze_apk">Analyze APK</string>
+    <string name="repackage_apk">Repackage APK</string>
+    <string name="install_apk">Install APK</string>
+    <string name="continue_label">Continue</string>
+    <string name="none_selected">No app selected</string>
+
+    <string name="show_system_apps">Show system apps</string>
+    <string name="search_hint">Search apps…</string>
+
+    <string name="advanced_signing">Advanced: import signing key</string>
+    <string name="keep_intermediates">Keep intermediate files</string>
+
+    <string name="limitations_title">Before you repackage</string>
+    <string name="limitations_body">
+        Renaming an app\'s package identity can break it. Depending on the app:\n\n
+        • Some apps will not run after a package-name change.\n
+        • Apps may verify their own signing certificate.\n
+        • Google Play services may depend on the original package/certificate.\n
+        • OAuth clients are often registered to the original package + certificate.\n
+        • Firebase configuration may depend on package/certificate identity.\n
+        • DRM systems may reject modified apps.\n
+        • Native libraries may assume the original package.\n
+        • Apps using reflection may break after namespace changes.\n
+        • Split APKs require processing the complete split set.\n
+        • Updating an existing app requires its original signing key.\n\n
+        The repackaged APK cannot keep the original developer\'s signature; it will be
+        signed with your own key. Only repackage apps you own or are permitted to modify.
+    </string>
+
+    <string name="conflict_installed">An application with this package name is already installed.\nChoose another package name or uninstall the existing application.</string>
+</resources>
