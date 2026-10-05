@@ -6,6 +6,7 @@ import com.apkrepacker.security.KeystoreManager;
 import com.apkrepacker.storage.ApkStorage;
 
 import java.io.File;
+import java.util.Map;
 
 /**
  * Drives the full repackage pipeline as explicit, ordered stages. Lives entirely off the
@@ -97,10 +98,19 @@ public final class RepackageEngine {
                     new ApkDecoder().decode(extracted.baseApk, decodeDir, log);
             progress.onStageDone(Stage.DECODE);
 
-            // ---- Stage: transform (manifest + dex) ----
+            // ---- Stage: transform (manifest + dex + optional display name & icon) ----
             progress.onStageStart(Stage.TRANSFORM);
             PackageTransformer.Result transform = new PackageTransformer().transform(
-                    decoded, analysis.packageName, req.newPackage, minSdk, modDir, log);
+                    decoded, analysis.packageName, req.newPackage, req.newLabel, minSdk, modDir, log);
+
+            int iconsWatermarked = 0;
+            if (req.watermarkIcon) {
+                Map<String, File> iconRepl = new IconWatermarker().watermark(
+                        context, req.originalPackage, extracted.baseApk,
+                        req.watermarkText, modDir, log);
+                transform.replacements.putAll(iconRepl);
+                iconsWatermarked = iconRepl.size();
+            }
             progress.onStageDone(Stage.TRANSFORM);
 
             // ---- Stage: rebuild (also aligns) ----
@@ -151,7 +161,7 @@ public final class RepackageEngine {
             log.info("Done. Output: " + signed.getAbsolutePath());
             return new RepackageResult(signed, req.newPackage, transform.detectedOldPackage,
                     verify, transform.manifestStringsChanged, transform.dexTypesRemapped,
-                    identity.description);
+                    identity.description, transform.labelChanged, req.newLabel, iconsWatermarked);
         } finally {
             if (!req.keepIntermediates) {
                 ApkStorage.deleteTree(decodeDir);

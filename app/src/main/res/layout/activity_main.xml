@@ -96,6 +96,46 @@
                 android:text="@string/new_package_hint" />
         </com.google.android.material.textfield.TextInputLayout>
 
+        <com.google.android.material.textfield.TextInputLayout
+            android:id="@+id/tilLabel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:hint="@string/new_display_name"
+            app:helperText="@string/new_display_name_helper"
+            app:helperTextEnabled="true"
+            style="@style/Widget.Material3.TextInputLayout.OutlinedBox">
+
+            <com.google.android.material.textfield.TextInputEditText
+                android:id="@+id/editLabel"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:inputType="textCapWords" />
+        </com.google.android.material.textfield.TextInputLayout>
+
+        <com.google.android.material.checkbox.MaterialCheckBox
+            android:id="@+id/chkWatermark"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/watermark_icon" />
+
+        <com.google.android.material.textfield.TextInputLayout
+            android:id="@+id/tilWatermark"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="@string/watermark_text"
+            android:visibility="gone"
+            style="@style/Widget.Material3.TextInputLayout.OutlinedBox">
+
+            <com.google.android.material.textfield.TextInputEditText
+                android:id="@+id/editWatermark"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:inputType="textCapCharacters"
+                android:maxLength="6"
+                android:text="@string/watermark_default" />
+        </com.google.android.material.textfield.TextInputLayout>
+
         <com.google.android.material.checkbox.MaterialCheckBox
             android:id="@+id/chkKeepIntermediates"
             android:layout_width="wrap_content"

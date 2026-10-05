@@ -17,8 +17,23 @@ device** — no PC, no Termux, no shell, no server, and signing keys never leave
    and potential issues.
 4. Rewrites the **package identity** across the files that actually carry it:
    the binary manifest and the DEX type references — never by blind byte replacement.
-5. Rebuilds + zipaligns, signs (APK Signature Scheme v1+v2+v3), verifies, and writes the
+5. Optionally **renames the display name** (inline `android:label` on `<application>`)
+   and **watermarks the launcher icon** (a corner ribbon composited onto the icon's
+   raster files; resource IDs and the table are left intact).
+6. Rebuilds + zipaligns, signs (APK Signature Scheme v1+v2+v3), verifies, and writes the
    output where you can install it via the system package installer (FileProvider).
+
+## Display name & icon watermark
+
+- **Display name:** the new name is written as an inline string on the `<application>`
+  `android:label`, overriding any `@string/...` reference. Android uses the application
+  label as the default for components without their own, so this renames what most
+  launchers show. Components with an explicit label keep it.
+- **Icon watermark:** the launcher icon is a resource ID, not a fixed path. It is resolved
+  (including adaptive-icon `<foreground>`/`<background>` layers) to the real `res/...`
+  image entries via the installed app's `Resources`, then a corner ribbon + short text is
+  composited with `Canvas` and the exact ZIP entries are swapped. Vector-only icons have
+  no raster to stamp and are reported + skipped; the rename still proceeds.
 
 ## Toolchain (all runs on-device)
 

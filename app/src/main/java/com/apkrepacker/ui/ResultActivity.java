@@ -25,6 +25,9 @@ public final class ResultActivity extends AppCompatActivity {
     public static final String EXTRA_NEW = "new";
     public static final String EXTRA_MIN_SDK = "min_sdk";
     public static final String EXTRA_KEEP = "keep";
+    public static final String EXTRA_LABEL = "label";
+    public static final String EXTRA_WATERMARK = "watermark";
+    public static final String EXTRA_WATERMARK_TEXT = "watermark_text";
 
     private ActivityResultBinding binding;
     private final Map<Stage, Character> stageState = new EnumMap<>(Stage.class);
@@ -57,11 +60,15 @@ public final class ResultActivity extends AppCompatActivity {
         String newPkg = getIntent().getStringExtra(EXTRA_NEW);
         int minSdk = getIntent().getIntExtra(EXTRA_MIN_SDK, 0);
         boolean keep = getIntent().getBooleanExtra(EXTRA_KEEP, false);
+        String label = getIntent().getStringExtra(EXTRA_LABEL);
+        boolean watermark = getIntent().getBooleanExtra(EXTRA_WATERMARK, false);
+        String watermarkText = getIntent().getStringExtra(EXTRA_WATERMARK_TEXT);
 
-        runPipeline(original, newPkg, minSdk, keep);
+        runPipeline(original, newPkg, minSdk, keep, label, watermark, watermarkText);
     }
 
-    private void runPipeline(String original, String newPkg, int minSdk, boolean keep) {
+    private void runPipeline(String original, String newPkg, int minSdk, boolean keep,
+                             String label, boolean watermark, String watermarkText) {
         final BuildLog log = new BuildLog();
         log.setObserver(entry -> runOnUiThread(() -> appendLog(entry.toString())));
 
@@ -75,7 +82,8 @@ public final class ResultActivity extends AppCompatActivity {
         };
 
         RepackageRequest req = new RepackageRequest(
-                original, newPkg, minSdk, SigningHolder.get(), keep);
+                original, newPkg, minSdk, SigningHolder.get(), keep,
+                label, watermark, watermarkText);
 
         new Thread(() -> {
             try {
@@ -96,6 +104,13 @@ public final class ResultActivity extends AppCompatActivity {
         StringBuilder sb = new StringBuilder();
         sb.append("Package:\n").append(r.newPackage).append("\n\n");
         sb.append("Original package:\n").append(r.originalPackage).append("\n\n");
+        if (r.labelChanged && r.newLabel != null) {
+            sb.append("Display name:\n").append(r.newLabel.trim()).append("\n\n");
+        }
+        if (r.iconsWatermarked > 0) {
+            sb.append("Icon watermark: applied to ")
+                    .append(r.iconsWatermarked).append(" icon file(s)\n\n");
+        }
         sb.append("Signer:\n").append(r.verification.signerSummary).append("\n\n");
         sb.append("Signing key:\n").append(r.signerDescription).append("\n\n");
         sb.append("APK:\n").append(r.outputApk.getName()).append("\n")

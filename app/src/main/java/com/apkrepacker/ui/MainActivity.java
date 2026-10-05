@@ -70,6 +70,10 @@ public final class MainActivity extends AppCompatActivity {
         binding.btnAnalyze.setOnClickListener(v -> analyze());
         binding.btnRepackage.setOnClickListener(v -> confirmAndRepackage());
 
+        binding.chkWatermark.setOnCheckedChangeListener((b, checked) ->
+                binding.tilWatermark.setVisibility(checked ? android.view.View.VISIBLE
+                        : android.view.View.GONE));
+
         binding.editPackage.addTextChangedListener(new TextWatcher() {
             @Override public void beforeTextChanged(CharSequence s, int a, int b, int c) {}
             @Override public void onTextChanged(CharSequence s, int a, int b, int c) {
@@ -235,7 +239,14 @@ public final class MainActivity extends AppCompatActivity {
         i.putExtra(ResultActivity.EXTRA_NEW, newPackage);
         i.putExtra(ResultActivity.EXTRA_MIN_SDK, analyzedMinSdk);
         i.putExtra(ResultActivity.EXTRA_KEEP, binding.chkKeepIntermediates.isChecked());
+        i.putExtra(ResultActivity.EXTRA_LABEL, text(binding.editLabel));
+        i.putExtra(ResultActivity.EXTRA_WATERMARK, binding.chkWatermark.isChecked());
+        i.putExtra(ResultActivity.EXTRA_WATERMARK_TEXT, text(binding.editWatermark));
         startActivity(i);
+    }
+
+    private static String text(com.google.android.material.textfield.TextInputEditText e) {
+        return e.getText() == null ? "" : e.getText().toString().trim();
     }
 
     // ---- advanced: import user signing keystore ----------------------------

@@ -18,6 +18,12 @@
     <string name="advanced_signing">Advanced: import signing key</string>
     <string name="keep_intermediates">Keep intermediate files</string>
 
+    <string name="new_display_name">New Display Name (optional)</string>
+    <string name="new_display_name_helper">Leave blank to keep the original app name</string>
+    <string name="watermark_icon">Watermark app icon</string>
+    <string name="watermark_text">Watermark text</string>
+    <string name="watermark_default">MOD</string>
+
     <string name="limitations_title">Before you repackage</string>
     <string name="limitations_body">
         Renaming an app\'s package identity can break it. Depending on the app:\n\n

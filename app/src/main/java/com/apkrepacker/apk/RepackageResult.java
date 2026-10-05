@@ -11,11 +11,15 @@ public final class RepackageResult {
     public final int manifestStringsChanged;
     public final int dexTypesRemapped;
     public final String signerDescription;
+    public final boolean labelChanged;
+    public final String newLabel;
+    public final int iconsWatermarked;
 
     public RepackageResult(File outputApk, String newPackage, String originalPackage,
                            ApkVerifier.VerifyResult verification,
                            int manifestStringsChanged, int dexTypesRemapped,
-                           String signerDescription) {
+                           String signerDescription,
+                           boolean labelChanged, String newLabel, int iconsWatermarked) {
         this.outputApk = outputApk;
         this.newPackage = newPackage;
         this.originalPackage = originalPackage;
@@ -23,5 +27,8 @@ public final class RepackageResult {
         this.manifestStringsChanged = manifestStringsChanged;
         this.dexTypesRemapped = dexTypesRemapped;
         this.signerDescription = signerDescription;
+        this.labelChanged = labelChanged;
+        this.newLabel = newLabel;
+        this.iconsWatermarked = iconsWatermarked;
     }
 }

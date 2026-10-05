@@ -25,13 +25,15 @@ public final class PackageTransformer {
         public final int manifestStringsChanged;
         public final int dexTypesRemapped;
         public final String detectedOldPackage;
+        public final boolean labelChanged;
 
         Result(Map<String, File> replacements, int manifestStringsChanged,
-               int dexTypesRemapped, String detectedOldPackage) {
+               int dexTypesRemapped, String detectedOldPackage, boolean labelChanged) {
             this.replacements = replacements;
             this.manifestStringsChanged = manifestStringsChanged;
             this.dexTypesRemapped = dexTypesRemapped;
             this.detectedOldPackage = detectedOldPackage;
+            this.labelChanged = labelChanged;
         }
     }
 
@@ -42,6 +44,7 @@ public final class PackageTransformer {
     public Result transform(ApkDecoder.Decoded decoded,
                             String declaredOldPackage,
                             String newPackage,
+                            String newLabel,
                             int minSdk,
                             File outDir,
                             BuildLog log) throws PipelineException {
@@ -50,6 +53,7 @@ public final class PackageTransformer {
         // ---- Manifest: read true package, rename pooled strings ----
         String oldPackage;
         int manifestChanged;
+        boolean labelChanged = false;
         File newManifest = new File(outDir, "AndroidManifest.xml");
         try {
             byte[] bytes = Files.readAllBytes(decoded.manifestFile.toPath());
@@ -65,6 +69,16 @@ public final class PackageTransformer {
                         "New package name is identical to the original (" + oldPackage + ").");
             }
             manifestChanged = axml.renamePackage(oldPackage, newPackage);
+            if (newLabel != null && !newLabel.trim().isEmpty()) {
+                labelChanged = axml.setApplicationLabel(newLabel.trim());
+                if (labelChanged) {
+                    log.info("Manifest: set application display name to \"" + newLabel.trim()
+                            + "\" (components with their own label keep it).");
+                } else {
+                    log.warn("Manifest: <application> has no label attribute; display name "
+                            + "left unchanged.");
+                }
+            }
             Files.write(newManifest.toPath(), axml.toByteArray());
             log.info("Manifest: rewrote " + manifestChanged + " pooled string(s); "
                     + "relative component names (\".Foo\") resolve under the new package.");
@@ -113,7 +127,7 @@ public final class PackageTransformer {
                     + "code references were left unchanged.");
         }
 
-        return new Result(replacements, manifestChanged, totalRemapped, oldPackage);
+        return new Result(replacements, manifestChanged, totalRemapped, oldPackage, labelChanged);
     }
 
     /** Naive but adequate substring search over raw bytes (no charset decoding). */

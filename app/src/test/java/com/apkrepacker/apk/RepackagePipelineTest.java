@@ -80,9 +80,10 @@ public final class RepackagePipelineTest {
         assertTrue("fixture must contain a dex", decoded.dexFiles.size() >= 1);
 
         PackageTransformer.Result transform = new PackageTransformer()
-                .transform(decoded, OLD_PKG, NEW_PKG, 26, modDir, log);
+                .transform(decoded, OLD_PKG, NEW_PKG, "Renamed App", 26, modDir, log);
         assertEquals(OLD_PKG, transform.detectedOldPackage);
         assertTrue("manifest should have changed strings", transform.manifestStringsChanged >= 1);
+        assertTrue("application label should have been set", transform.labelChanged);
         assertTrue("our own app's dex references com.apkrepacker.* types",
                 transform.dexTypesRemapped >= 1);
 
@@ -92,7 +93,10 @@ public final class RepackagePipelineTest {
         // Confirm the rebuilt (unsigned) APK carries the new package per PackageManager-free parse.
         try (ZipFile zip = new ZipFile(unsigned)) {
             byte[] m = readAll(zip, zip.getEntry("AndroidManifest.xml"));
-            assertEquals(NEW_PKG, AxmlFile.parse(m).getManifestPackage());
+            AxmlFile parsed = AxmlFile.parse(m);
+            assertEquals(NEW_PKG, parsed.getManifestPackage());
+            assertTrue("inline display name present in manifest",
+                    parsed.strings().contains("Renamed App"));
             assertTrue("resources.arsc preserved", zip.getEntry("resources.arsc") != null);
         }
 

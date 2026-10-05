@@ -30,9 +30,17 @@ public final class AxmlFile {
 
     private static final int TYPE_XML = 0x0003;
     private static final int TYPE_STRING_POOL = 0x0001;
+    private static final int TYPE_RESOURCE_MAP = 0x0180;
     private static final int TYPE_START_ELEMENT = 0x0102;
 
     private static final int FLAG_UTF8 = 0x00000100;
+
+    // Framework attribute resource IDs (stable AOSP public ids).
+    public static final int ATTR_LABEL = 0x01010001;
+    public static final int ATTR_DRAWABLE = 0x01010199;
+
+    private static final int TYPE_REFERENCE = 0x01; // ResValue dataType for a resource ref
+    private static final int TYPE_STRING_VALUE = 0x03; // ResValue dataType for an inline string
 
     private final byte[] data;
 
@@ -206,6 +214,121 @@ public final class AxmlFile {
             }
         }
         return changed;
+    }
+
+    /** Appends a new string to the pool (indices of existing strings are preserved). */
+    public int addString(String s) {
+        strings.add(s);
+        return strings.size() - 1;
+    }
+
+    /**
+     * Sets the {@code <application>}'s {@code android:label} to an inline string (the new
+     * display name), overriding any {@code @string/...} reference it held.
+     *
+     * <p>Android uses the application label as the default for components that don't declare
+     * their own, so this renames what most launchers show. Activities with their own explicit
+     * label keep it.
+     *
+     * @return true if the application element had a label attribute that was updated.
+     */
+    public boolean setApplicationLabel(String newLabel) {
+        int off = findFirstElementOffset("application");
+        if (off < 0) {
+            return false;
+        }
+        int[] resMap = resourceMap();
+        int attrStart = u16(off + 24);
+        int attrCount = u16(off + 28);
+        int base = off + 16 + attrStart;
+        for (int a = 0; a < attrCount; a++) {
+            int ab = base + a * 20;
+            int nameIdx = u32(ab + 4);
+            int resId = (nameIdx >= 0 && nameIdx < resMap.length) ? resMap[nameIdx] : -1;
+            if (resId == ATTR_LABEL) {
+                int idx = addString(newLabel);
+                writeU32(data, ab + 8, idx);              // rawValue -> new string
+                data[ab + 15] = (byte) TYPE_STRING_VALUE; // typedValue.dataType = string
+                writeU32(data, ab + 16, idx);             // typedValue.data -> new string
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Collects the resource IDs referenced by {@code attrResId} on every element named
+     * {@code elementName}. Used to resolve adaptive-icon {@code <foreground>}/{@code <background>}
+     * drawables to their underlying resources.
+     */
+    public java.util.List<Integer> getAttrReferences(String elementName, int attrResId) {
+        java.util.List<Integer> out = new ArrayList<>();
+        int nameIdx = strings.indexOf(elementName);
+        if (nameIdx < 0) {
+            return out;
+        }
+        int[] resMap = resourceMap();
+        int off = poolChunkOffset + poolChunkSize;
+        while (off + 8 <= data.length) {
+            int type = u16(off);
+            int size = u32(off + 4);
+            if (size <= 0) break;
+            if (type == TYPE_START_ELEMENT && u32(off + 20) == nameIdx) {
+                int attrStart = u16(off + 24);
+                int attrCount = u16(off + 28);
+                int base = off + 16 + attrStart;
+                for (int a = 0; a < attrCount; a++) {
+                    int ab = base + a * 20;
+                    int ni = u32(ab + 4);
+                    int resId = (ni >= 0 && ni < resMap.length) ? resMap[ni] : -1;
+                    if (resId == attrResId && (data[ab + 15] & 0xFF) == TYPE_REFERENCE) {
+                        out.add(u32(ab + 16));
+                    }
+                }
+            }
+            off += size;
+        }
+        return out;
+    }
+
+    private int findFirstElementOffset(String elementName) {
+        int nameIdx = strings.indexOf(elementName);
+        if (nameIdx < 0) {
+            return -1;
+        }
+        int off = poolChunkOffset + poolChunkSize;
+        while (off + 8 <= data.length) {
+            int type = u16(off);
+            int size = u32(off + 4);
+            if (size <= 0) break;
+            if (type == TYPE_START_ELEMENT && u32(off + 20) == nameIdx) {
+                return off;
+            }
+            off += size;
+        }
+        return -1;
+    }
+
+    private int[] resourceMap() {
+        int off = poolChunkOffset + poolChunkSize;
+        while (off + 8 <= data.length) {
+            int type = u16(off);
+            int size = u32(off + 4);
+            if (size <= 0) break;
+            if (type == TYPE_RESOURCE_MAP) {
+                int n = (size - 8) / 4;
+                int[] m = new int[n];
+                for (int i = 0; i < n; i++) {
+                    m[i] = u32(off + 8 + i * 4);
+                }
+                return m;
+            }
+            if (type == TYPE_START_ELEMENT) {
+                break; // the resource map always precedes the XML body
+            }
+            off += size;
+        }
+        return new int[0];
     }
 
     /** Serializes the (possibly modified) AXML back to bytes. */
