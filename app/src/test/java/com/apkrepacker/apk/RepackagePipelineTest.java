@@ -6,16 +6,24 @@ import static org.junit.Assert.assertTrue;
 
 import com.apkrepacker.apk.axml.AxmlFile;
 
+import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter;
+import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder;
+import org.bouncycastle.operator.ContentSigner;
+import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
+import org.bouncycastle.asn1.x500.X500Name;
 import org.junit.Test;
 
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.math.BigInteger;
 import java.nio.file.Files;
-import java.security.KeyStore;
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
 import java.security.PrivateKey;
 import java.security.cert.X509Certificate;
+import java.util.Date;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
@@ -100,14 +108,11 @@ public final class RepackagePipelineTest {
             assertTrue("resources.arsc preserved", zip.getEntry("resources.arsc") != null);
         }
 
-        // Sign with a key loaded from a PKCS12 keystore (AndroidKeyStore is device-only;
-        // this mirrors the KeystoreManager import path).
-        KeyStore ks = KeyStore.getInstance("PKCS12");
-        try (InputStream in = getClass().getResourceAsStream("/test.p12")) {
-            ks.load(in, "testpass".toCharArray());
-        }
-        PrivateKey pk = (PrivateKey) ks.getKey("testkey", "testpass".toCharArray());
-        X509Certificate cert = (X509Certificate) ks.getCertificate("testkey");
+        // Sign with an ephemeral self-signed key generated at runtime (AndroidKeyStore is
+        // device-only). Nothing is committed to the repo and nothing ships in the app.
+        KeyPair kp = genKeyPair();
+        X509Certificate cert = selfSignedCert(kp);
+        PrivateKey pk = kp.getPrivate();
 
         File signed = File.createTempFile("signed", ".apk");
         com.android.apksig.ApkSigner.SignerConfig cfg =
@@ -142,5 +147,23 @@ public final class RepackagePipelineTest {
             while ((n = is.read(buf)) > 0) bos.write(buf, 0, n);
             return bos.toByteArray();
         }
+    }
+
+    private static KeyPair genKeyPair() throws Exception {
+        KeyPairGenerator kpg = KeyPairGenerator.getInstance("RSA");
+        kpg.initialize(2048);
+        return kpg.generateKeyPair();
+    }
+
+    /** Builds a self-signed X.509 certificate for the key pair using BouncyCastle. */
+    private static X509Certificate selfSignedCert(KeyPair kp) throws Exception {
+        X500Name dn = new X500Name("CN=Test Signer, O=APK Repacker Test");
+        long now = System.currentTimeMillis();
+        Date from = new Date(now);
+        Date to = new Date(now + 3650L * 24 * 60 * 60 * 1000);
+        JcaX509v3CertificateBuilder builder = new JcaX509v3CertificateBuilder(
+                dn, BigInteger.valueOf(now), from, to, dn, kp.getPublic());
+        ContentSigner signer = new JcaContentSignerBuilder("SHA256withRSA").build(kp.getPrivate());
+        return new JcaX509CertificateConverter().getCertificate(builder.build(signer));
     }
 }

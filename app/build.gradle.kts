@@ -69,6 +69,9 @@ dependencies {
     // documented chunk format (com.apkrepacker.apk.axml) — no native tooling needed.
 
     testImplementation("junit:junit:4.13.2")
+    // Test-only: generate an ephemeral self-signed signing key at runtime, so no keystore
+    // is committed to the repo. Not shipped in the app.
+    testImplementation("org.bouncycastle:bcpkix-jdk18on:1.78.1")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")
 }
