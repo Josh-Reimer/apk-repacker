@@ -10,6 +10,9 @@ public final class RepackageResult {
     public final ApkVerifier.VerifyResult verification;
     public final int manifestStringsChanged;
     public final int dexTypesRemapped;
+    public final int resXmlStringsChanged;
+    /** Final authorities already owned by an installed app; the install will be refused. */
+    public final java.util.List<String> providerConflicts;
     public final String signerDescription;
     public final boolean labelChanged;
     public final String newLabel;
@@ -18,6 +21,7 @@ public final class RepackageResult {
     public RepackageResult(File outputApk, String newPackage, String originalPackage,
                            ApkVerifier.VerifyResult verification,
                            int manifestStringsChanged, int dexTypesRemapped,
+                           int resXmlStringsChanged, java.util.List<String> providerConflicts,
                            String signerDescription,
                            boolean labelChanged, String newLabel, int iconsWatermarked) {
         this.outputApk = outputApk;
@@ -26,6 +30,8 @@ public final class RepackageResult {
         this.verification = verification;
         this.manifestStringsChanged = manifestStringsChanged;
         this.dexTypesRemapped = dexTypesRemapped;
+        this.resXmlStringsChanged = resXmlStringsChanged;
+        this.providerConflicts = providerConflicts;
         this.signerDescription = signerDescription;
         this.labelChanged = labelChanged;
         this.newLabel = newLabel;

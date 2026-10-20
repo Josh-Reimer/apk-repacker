@@ -14,6 +14,19 @@ import java.util.List;
  */
 public final class ApkSigner {
 
+    /**
+     * apksig signs v1 (JAR) with SHA-1 for minSdk below 18. The AndroidKeyStore key is only
+     * authorized for SHA-256/SHA-512 (and existing keys can't gain digests), so signing an
+     * app with e.g. minSdk 14 failed. Signing for at least API 18 makes v1 use SHA-256; the
+     * only cost is that the output no longer installs on Android 4.2 and older.
+     */
+    public static final int MIN_SIGNING_SDK = 18;
+
+    /** The min SDK to sign and verify for, given the app's declared min SDK. */
+    public static int signingMinSdk(int appMinSdk) {
+        return Math.max(appMinSdk, MIN_SIGNING_SDK);
+    }
+
     public File sign(File unsignedApk, File signedApk,
                      KeystoreManager.SigningIdentity identity, int minSdk, BuildLog log)
             throws PipelineException {
@@ -41,8 +54,15 @@ public final class ApkSigner {
             log.info("Signed APK with v1+v2+v3 schemes using: " + identity.description);
             return signedApk;
         } catch (Exception e) {
-            throw new PipelineException(Stage.SIGN,
-                    "Signing failed: " + e.getMessage(), e);
+            // apksig wraps the useful part ("Failed to sign using signer X"); surface the cause.
+            Throwable root = e;
+            while (root.getCause() != null && root.getCause() != root) {
+                root = root.getCause();
+            }
+            String reason = root == e ? String.valueOf(e.getMessage())
+                    : e.getMessage() + " (" + root.getClass().getSimpleName() + ": "
+                    + root.getMessage() + ")";
+            throw new PipelineException(Stage.SIGN, "Signing failed: " + reason, e);
         }
     }
 }

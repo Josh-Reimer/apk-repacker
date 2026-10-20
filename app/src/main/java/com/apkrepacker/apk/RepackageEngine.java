@@ -6,6 +6,7 @@ import com.apkrepacker.security.KeystoreManager;
 import com.apkrepacker.storage.ApkStorage;
 
 import java.io.File;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -40,11 +41,66 @@ public final class RepackageEngine {
         try {
             ApkExtractor.Extracted extracted =
                     new ApkExtractor(context).extract(packageName, workDir, log);
-            return new ApkAnalyzer(context)
+            ApkAnalysis analysis = new ApkAnalyzer(context)
                     .analyze(extracted.baseApk, extracted.hasSplits, log);
+            for (String abi : extracted.externalNativeAbis()) {
+                analysis.nativeAbis.add(abi + " (outside APK)");
+            }
+            if (!extracted.externalNativeLibs.isEmpty()) {
+                analysis.potentialIssues.add("Native libraries are installed outside the APK "
+                        + "(typical of preinstalled apps); they will be bundled into the output.");
+            }
+            return analysis;
         } finally {
             ApkStorage.deleteTree(workDir);
         }
+    }
+
+    /** The original app's provider authorities, resolved by PackageManager. */
+    private List<String> installedAuthorities(String pkg) {
+        List<String> out = new java.util.ArrayList<>();
+        try {
+            android.content.pm.PackageInfo pi = context.getPackageManager().getPackageInfo(pkg,
+                    android.content.pm.PackageManager.GET_PROVIDERS
+                            | android.content.pm.PackageManager.MATCH_DISABLED_COMPONENTS);
+            if (pi.providers != null) {
+                for (android.content.pm.ProviderInfo p : pi.providers) {
+                    if (p.authority != null) {
+                        out.add(p.authority);
+                    }
+                }
+            }
+        } catch (android.content.pm.PackageManager.NameNotFoundException ignored) {
+            // Extraction already failed loudly for a missing package.
+        }
+        return out;
+    }
+
+    /**
+     * Authorities the output will declare that an installed app already owns. Android refuses
+     * to install a package whose provider authority is taken (INSTALL_FAILED_CONFLICTING_
+     * PROVIDER), so these are reported up front instead of surfacing as an install failure.
+     */
+    private List<String> providerConflicts(List<String> originalAuthorities,
+                                           Map<String, String> renames, String originalPkg,
+                                           BuildLog log) {
+        List<String> conflicts = new java.util.ArrayList<>();
+        android.content.pm.PackageManager pm = context.getPackageManager();
+        for (String declared : originalAuthorities) {
+            for (String a : declared.split(";")) {
+                String fin = renames.containsKey(a) ? renames.get(a) : a;
+                android.content.pm.ProviderInfo owner = pm.resolveContentProvider(fin,
+                        android.content.pm.PackageManager.MATCH_DISABLED_COMPONENTS);
+                if (owner != null) {
+                    String msg = fin + " (already used by " + owner.packageName + ")";
+                    conflicts.add(msg);
+                    log.warn("Provider authority conflict: " + msg + ". Android will refuse to "
+                            + "install the output while " + owner.packageName
+                            + " is installed.");
+                }
+            }
+        }
+        return conflicts;
     }
 
     public RepackageResult run(RepackageRequest req, ProgressListener progress, BuildLog log)
@@ -100,8 +156,12 @@ public final class RepackageEngine {
 
             // ---- Stage: transform (manifest + dex + optional display name & icon) ----
             progress.onStageStart(Stage.TRANSFORM);
+            List<String> originalAuthorities = installedAuthorities(req.originalPackage);
             PackageTransformer.Result transform = new PackageTransformer().transform(
-                    decoded, analysis.packageName, req.newPackage, req.newLabel, minSdk, modDir, log);
+                    decoded, analysis.packageName, req.newPackage, req.newLabel, minSdk,
+                    originalAuthorities, modDir, log);
+            List<String> conflicts = providerConflicts(originalAuthorities,
+                    transform.authorityRenames, req.originalPackage, log);
 
             int iconsWatermarked = 0;
             if (req.watermarkIcon) {
@@ -116,7 +176,8 @@ public final class RepackageEngine {
             // ---- Stage: rebuild (also aligns) ----
             progress.onStageStart(Stage.REBUILD);
             File unsigned = new File(workDir, "unsigned.apk");
-            new ApkBuilder().build(extracted.baseApk, transform.replacements, unsigned, log);
+            new ApkBuilder().build(extracted.baseApk, transform.replacements,
+                    extracted.externalNativeLibs, unsigned, log);
             progress.onStageDone(Stage.REBUILD);
 
             // ---- Stage: zipalign (performed during rebuild; recorded explicitly) ----
@@ -144,13 +205,19 @@ public final class RepackageEngine {
             }
             File signed = new File(outputsDir,
                     safeFileName(req.newPackage) + ".apk");
-            new ApkSigner().sign(unsigned, signed, identity, minSdk, log);
+            int signingMinSdk = ApkSigner.signingMinSdk(minSdk);
+            if (signingMinSdk != minSdk) {
+                log.info("App declares minSdk " + minSdk + "; signing for API " + signingMinSdk
+                        + "+ so the v1 signature uses SHA-256 (output won't install below "
+                        + "Android 4.3).");
+            }
+            new ApkSigner().sign(unsigned, signed, identity, signingMinSdk, log);
             progress.onStageDone(Stage.SIGN);
 
             // ---- Stage: verify ----
             progress.onStageStart(Stage.VERIFY);
             ApkVerifier.VerifyResult verify =
-                    new ApkVerifier().verify(signed, minSdk, log);
+                    new ApkVerifier().verify(signed, signingMinSdk, log);
             if (!verify.verified) {
                 throw new PipelineException(Stage.VERIFY,
                         "The signed APK did not pass signature verification. "
@@ -161,7 +228,7 @@ public final class RepackageEngine {
             log.info("Done. Output: " + signed.getAbsolutePath());
             return new RepackageResult(signed, req.newPackage, transform.detectedOldPackage,
                     verify, transform.manifestStringsChanged, transform.dexTypesRemapped,
-                    identity.description, transform.labelChanged, req.newLabel, iconsWatermarked);
+                    transform.resXmlStringsChanged, conflicts, identity.description, transform.labelChanged, req.newLabel, iconsWatermarked);
         } finally {
             if (!req.keepIntermediates) {
                 ApkStorage.deleteTree(decodeDir);

@@ -23,7 +23,9 @@ import java.util.zip.ZipOutputStream;
  *
  * <ul>
  *   <li>Entries copied verbatim keep their original compression method.</li>
- *   <li>Replaced entries (manifest, DEX) are re-deflated.</li>
+ *   <li>Replaced entries (manifest, DEX) are re-deflated, unless the original entry was
+ *       STORED (e.g. resources.arsc, which Android 11+ requires uncompressed and aligned) —
+ *       then the replacement is STORED and aligned too.</li>
  *   <li>Old v1 signature files (META-INF/*.SF/.RSA/.DSA/.EC, MANIFEST.MF) are dropped —
  *       the output is re-signed.</li>
  *   <li>STORED entries are aligned: 4096 bytes for uncompressed {@code .so}, 4 bytes
@@ -45,6 +47,16 @@ public final class ApkBuilder {
     }
 
     public File build(File originalApk, Map<String, File> replacements,
+                      File outApk, BuildLog log) throws PipelineException {
+        return build(originalApk, replacements, java.util.Collections.emptyMap(), outApk, log);
+    }
+
+    /**
+     * @param additions new entries (by ZIP entry name) not present in the original, written
+     *                  STORED and aligned — used for native libraries found outside the APK.
+     */
+    public File build(File originalApk, Map<String, File> replacements,
+                      Map<String, File> additions,
                       File outApk, BuildLog log) throws PipelineException {
         try (ZipFile in = new ZipFile(originalApk);
              Counting counting = new Counting(
@@ -69,7 +81,12 @@ public final class ApkBuilder {
 
                 File replacement = replacements.get(name);
                 if (replacement != null) {
-                    writeDeflated(out, counting, name, Files.readAllBytes(replacement.toPath()));
+                    byte[] bytes = Files.readAllBytes(replacement.toPath());
+                    if (src.getMethod() == ZipEntry.STORED) {
+                        writeStoredAligned(out, counting, name, bytes);
+                    } else {
+                        writeDeflated(out, counting, name, bytes);
+                    }
                     replaced++;
                 } else if (src.getMethod() == ZipEntry.STORED) {
                     writeStoredAligned(in, src, out, counting, name);
@@ -80,9 +97,15 @@ public final class ApkBuilder {
                 }
             }
 
+            for (Map.Entry<String, File> add : additions.entrySet()) {
+                writeStoredAligned(out, counting, add.getKey(),
+                        Files.readAllBytes(add.getValue().toPath()));
+            }
+
             out.finish();
             log.info("Rebuilt APK: " + replaced + " replaced, " + copied
-                    + " copied, " + dropped + " old-signature entries dropped.");
+                    + " copied, " + additions.size() + " added, " + dropped
+                    + " old-signature entries dropped.");
             return outApk;
         } catch (IOException e) {
             throw new PipelineException(Stage.REBUILD,
@@ -111,7 +134,11 @@ public final class ApkBuilder {
 
     private static void writeStoredAligned(ZipFile in, ZipEntry src, ZipOutputStream out,
                                            Counting counting, String name) throws IOException {
-        byte[] data = readAll(in, src);
+        writeStoredAligned(out, counting, name, readAll(in, src));
+    }
+
+    private static void writeStoredAligned(ZipOutputStream out, Counting counting,
+                                           String name, byte[] data) throws IOException {
         int align = name.endsWith(".so") ? ALIGN_SO : ALIGN_DEFAULT;
 
         ZipEntry e = new ZipEntry(name);

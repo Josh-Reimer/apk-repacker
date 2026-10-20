@@ -15,8 +15,8 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
 /**
- * "Decode" stage: pulls the entries we intend to rewrite (the binary manifest and the
- * DEX files) out of the APK into a scratch directory, with full zip-slip and size-bomb
+ * "Decode" stage: pulls the entries we intend to rewrite (the binary manifest, the DEX
+ * files, and the binary XML under res/ that may name app classes) out of the APK into a scratch directory, with full zip-slip and size-bomb
  * protection. Everything else stays inside the original APK and is copied verbatim at
  * rebuild time — we never fully explode and recompile resources we don't need to touch.
  */
@@ -26,11 +26,18 @@ public final class ApkDecoder {
         public final File manifestFile;      // extracted AndroidManifest.xml (binary)
         public final List<File> dexFiles;    // extracted classesN.dex, in entry order
         public final List<String> dexEntryNames;
+        public final List<File> resXmlFiles; // extracted res/**/*.xml, in entry order
+        public final List<String> resXmlEntryNames;
+        public final File resourcesArsc;     // extracted resources.arsc, or null if absent
 
-        Decoded(File manifestFile, List<File> dexFiles, List<String> dexEntryNames) {
+        Decoded(File manifestFile, List<File> dexFiles, List<String> dexEntryNames,
+                List<File> resXmlFiles, List<String> resXmlEntryNames, File resourcesArsc) {
             this.manifestFile = manifestFile;
             this.dexFiles = dexFiles;
             this.dexEntryNames = dexEntryNames;
+            this.resXmlFiles = resXmlFiles;
+            this.resXmlEntryNames = resXmlEntryNames;
+            this.resourcesArsc = resourcesArsc;
         }
     }
 
@@ -38,6 +45,9 @@ public final class ApkDecoder {
         File manifestOut = null;
         List<File> dexFiles = new ArrayList<>();
         List<String> dexNames = new ArrayList<>();
+        List<File> resXmlFiles = new ArrayList<>();
+        List<String> resXmlNames = new ArrayList<>();
+        File arscOut = null;
         long total = 0;
 
         try (ZipFile zip = new ZipFile(apk)) {
@@ -50,7 +60,9 @@ public final class ApkDecoder {
                 String name = entry.getName();
                 boolean isManifest = name.equals("AndroidManifest.xml");
                 boolean isDex = name.matches("classes\\d*\\.dex");
-                if (!isManifest && !isDex) {
+                boolean isResXml = name.startsWith("res/") && name.endsWith(".xml");
+                boolean isArsc = name.equals("resources.arsc");
+                if (!isManifest && !isDex && !isResXml && !isArsc) {
                     continue;
                 }
 
@@ -65,12 +77,18 @@ public final class ApkDecoder {
                 if (isManifest) {
                     manifestOut = out;
                     log.info("Decoded AndroidManifest.xml (" + written + " bytes)");
-                } else {
+                } else if (isArsc) {
+                    arscOut = out;
+                } else if (isDex) {
                     dexFiles.add(out);
                     dexNames.add(name);
                     log.info("Decoded " + name + " (" + written + " bytes)");
+                } else {
+                    resXmlFiles.add(out);
+                    resXmlNames.add(name);
                 }
             }
+            log.info("Decoded " + resXmlFiles.size() + " resource XML file(s)");
         } catch (IOException e) {
             throw new PipelineException(Stage.DECODE,
                     "Failed to decode APK entries: " + e.getMessage(), e);
@@ -79,7 +97,7 @@ public final class ApkDecoder {
         if (manifestOut == null) {
             throw new PipelineException(Stage.DECODE, "AndroidManifest.xml not found in APK.");
         }
-        return new Decoded(manifestOut, dexFiles, dexNames);
+        return new Decoded(manifestOut, dexFiles, dexNames, resXmlFiles, resXmlNames, arscOut);
     }
 
     private static long extract(ZipFile zip, ZipEntry entry, File out) throws IOException {

@@ -45,6 +45,7 @@ public final class ResultActivity extends AppCompatActivity {
             stageState.put(s, '•');
         }
         renderStages();
+        binding.txtStatus.setText("Starting…");
 
         binding.btnInstall.setOnClickListener(v -> {
             if (outputApk != null) {
@@ -94,6 +95,7 @@ public final class ResultActivity extends AppCompatActivity {
             } catch (Exception e) {
                 runOnUiThread(() -> {
                     appendLog("Unexpected error: " + e.getMessage());
+                    showFailedStatus("Repackaging failed: unexpected error");
                 });
             }
         }).start();
@@ -116,20 +118,34 @@ public final class ResultActivity extends AppCompatActivity {
         sb.append("APK:\n").append(r.outputApk.getName()).append("\n")
                 .append(r.outputApk.getAbsolutePath()).append("\n\n");
         sb.append("Manifest strings changed: ").append(r.manifestStringsChanged).append('\n');
-        sb.append("DEX type refs remapped: ").append(r.dexTypesRemapped).append("\n\n");
+        sb.append("DEX type refs remapped: ").append(r.dexTypesRemapped).append('\n');
+        sb.append("Resource XML class refs: ").append(r.resXmlStringsChanged).append("\n\n");
         sb.append("Schemes: v1=").append(r.verification.v1)
                 .append(" v2=").append(r.verification.v2)
                 .append(" v3=").append(r.verification.v3).append("\n\n");
         sb.append("Signature:\n").append(r.verification.verified ? "VALID" : "INVALID");
+        if (!r.providerConflicts.isEmpty()) {
+            sb.append("\n\n⚠ Will not install while these provider authorities are taken:\n");
+            for (String c : r.providerConflicts) {
+                sb.append("  ").append(c).append('\n');
+            }
+        }
 
         binding.txtSummary.setText(sb.toString());
         binding.cardSummary.setVisibility(View.VISIBLE);
         binding.btnInstall.setEnabled(true);
+
+        binding.progressBar.setProgressCompat(100, true);
+        binding.txtStatus.setText(!r.verification.verified ? "Complete — signature INVALID"
+                : !r.providerConflicts.isEmpty() ? "Complete — install will conflict"
+                : "✓ Complete");
+        setTitle("Repackaging complete");
     }
 
     private void onFailure(PipelineException e) {
         stageState.put(e.stage, '✗');
         renderStages();
+        showFailedStatus("✗ Failed at: " + e.stage.label);
         String msg = "Repackaging failed.\n\n"
                 + "Stage: " + e.stage.label + "\n\n"
                 + "Reason:\n" + e.getMessage() + "\n\n"
@@ -138,12 +154,37 @@ public final class ResultActivity extends AppCompatActivity {
         binding.cardSummary.setVisibility(View.VISIBLE);
     }
 
+    private void showFailedStatus(String status) {
+        int error = com.google.android.material.color.MaterialColors.getColor(
+                binding.progressBar, androidx.appcompat.R.attr.colorError);
+        binding.progressBar.setIndicatorColor(error);
+        binding.txtStatus.setText(status);
+        binding.txtStatus.setTextColor(error);
+        setTitle("Repackaging failed");
+    }
+
     private void renderStages() {
         StringBuilder sb = new StringBuilder();
+        int done = 0;
+        Stage running = null;
         for (Stage s : Stage.values()) {
-            sb.append(stageState.get(s)).append(' ').append(s.label).append('\n');
+            char state = stageState.get(s);
+            if (state == '✓') {
+                done++;
+            } else if (state == '…') {
+                running = s;
+            }
+            sb.append(state).append(' ').append(s.label).append('\n');
         }
         binding.txtStages.setText(sb.toString().trim());
+
+        // The final 100% is set by onSuccess, so the bar only fills once results are shown.
+        int total = Stage.values().length;
+        binding.progressBar.setProgressCompat(Math.min(99, done * 100 / total), true);
+        if (running != null) {
+            binding.txtStatus.setText(String.format(java.util.Locale.US,
+                    "Step %d of %d: %s…", running.ordinal() + 1, total, running.label));
+        }
     }
 
     private void appendLog(String line) {

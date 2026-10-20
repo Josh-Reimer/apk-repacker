@@ -38,6 +38,7 @@ public final class AxmlFile {
     // Framework attribute resource IDs (stable AOSP public ids).
     public static final int ATTR_LABEL = 0x01010001;
     public static final int ATTR_DRAWABLE = 0x01010199;
+    public static final int ATTR_AUTHORITIES = 0x01010018;
 
     private static final int TYPE_REFERENCE = 0x01; // ResValue dataType for a resource ref
     private static final int TYPE_STRING_VALUE = 0x03; // ResValue dataType for an inline string
@@ -48,6 +49,7 @@ public final class AxmlFile {
     private int poolChunkOffset;      // offset of the string pool ResChunk_header
     private int poolChunkSize;        // original byte size of the pool chunk
     private int poolFlags;
+    private int styleCount;           // styled spans are not preserved by toByteArray()
     private boolean utf8;
     private List<String> strings = new ArrayList<>();
 
@@ -101,6 +103,7 @@ public final class AxmlFile {
         int base = poolChunkOffset;
         poolChunkSize = u32(base + 4);
         int stringCount = u32(base + 8);
+        styleCount = u32(base + 12);
         poolFlags = u32(base + 16);
         utf8 = (poolFlags & FLAG_UTF8) != 0;
         int stringsStart = u32(base + 20); // offset from chunk start to string data
@@ -216,6 +219,33 @@ public final class AxmlFile {
         return changed;
     }
 
+    /**
+     * Whether the pool carries styled-string spans. {@link #toByteArray()} rebuilds the pool
+     * without them, so callers must not rewrite such a file.
+     */
+    public boolean hasStyles() {
+        return styleCount > 0;
+    }
+
+    /**
+     * Replaces pooled strings that <em>exactly</em> equal a key of {@code renames}. Unlike
+     * {@link #renamePackage}, nothing is matched by prefix: used for resource XML, where only
+     * strings naming a class that was actually renamed may change.
+     *
+     * @return number of strings changed.
+     */
+    public int renameExact(java.util.Map<String, String> renames) {
+        int changed = 0;
+        for (int i = 0; i < strings.size(); i++) {
+            String replacement = renames.get(strings.get(i));
+            if (replacement != null) {
+                strings.set(i, replacement);
+                changed++;
+            }
+        }
+        return changed;
+    }
+
     /** Appends a new string to the pool (indices of existing strings are preserved). */
     public int addString(String s) {
         strings.add(s);
@@ -283,6 +313,47 @@ public final class AxmlFile {
                     int resId = (ni >= 0 && ni < resMap.length) ? resMap[ni] : -1;
                     if (resId == attrResId && (data[ab + 15] & 0xFF) == TYPE_REFERENCE) {
                         out.add(u32(ab + 16));
+                    }
+                }
+            }
+            off += size;
+        }
+        return out;
+    }
+
+    /**
+     * Pool indices of the string values of {@code attrResId} on every {@code elementName}
+     * element (e.g. each {@code <provider android:authorities>}). Indices, not strings, so a
+     * caller can read the same slots before and after a rename to pair old with new values.
+     */
+    public java.util.List<Integer> getAttrStringIndices(String elementName, int attrResId) {
+        java.util.List<Integer> out = new ArrayList<>();
+        int nameIdx = strings.indexOf(elementName);
+        if (nameIdx < 0) {
+            return out;
+        }
+        int[] resMap = resourceMap();
+        int off = poolChunkOffset + poolChunkSize;
+        while (off + 8 <= data.length) {
+            int type = u16(off);
+            int size = u32(off + 4);
+            if (size <= 0) break;
+            if (type == TYPE_START_ELEMENT && u32(off + 20) == nameIdx) {
+                int attrStart = u16(off + 24);
+                int attrCount = u16(off + 28);
+                int base = off + 16 + attrStart;
+                for (int a = 0; a < attrCount; a++) {
+                    int ab = base + a * 20;
+                    int ni = u32(ab + 4);
+                    int resId = (ni >= 0 && ni < resMap.length) ? resMap[ni] : -1;
+                    if (resId != attrResId) {
+                        continue;
+                    }
+                    int raw = u32(ab + 8);
+                    if ((data[ab + 15] & 0xFF) == TYPE_STRING_VALUE) {
+                        out.add(u32(ab + 16));
+                    } else if (raw >= 0 && raw < strings.size()) {
+                        out.add(raw);
                     }
                 }
             }
@@ -395,7 +466,7 @@ public final class AxmlFile {
         return chunk;
     }
 
-    private static byte[] encodeUtf16(String s) {
+    static byte[] encodeUtf16(String s) {
         byte[] body = s.getBytes(StandardCharsets.UTF_16LE);
         int chars = body.length / 2;
         ByteArrayOutputStream b = new ByteArrayOutputStream();
@@ -412,7 +483,7 @@ public final class AxmlFile {
         return b.toByteArray();
     }
 
-    private static byte[] encodeUtf8(String s) {
+    static byte[] encodeUtf8(String s) {
         byte[] body = s.getBytes(StandardCharsets.UTF_8);
         int chars = s.length(); // UTF-16 char count
         int bytes = body.length;
