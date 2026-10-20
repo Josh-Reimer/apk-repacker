@@ -338,6 +338,49 @@ public final class RepackagePipelineTest {
         }
     }
 
+    /**
+     * A split set is renamed as one unit: every manifest gets the new package, and an APK
+     * from a different package is rejected rather than silently mixed in.
+     */
+    @Test
+    public void splitSetRenamesEveryManifestAndRejectsForeignSplit() throws Exception {
+        File apk = fixture();
+        BuildLog log = new BuildLog();
+        ApkDecoder.Decoded base = new ApkDecoder().decode(
+                apk, Files.createTempDirectory("base").toFile(), log);
+        ApkDecoder.Decoded split = new ApkDecoder().decode(
+                apk, Files.createTempDirectory("split").toFile(), log);
+
+        PackageTransformer.Result r = new PackageTransformer().transformSet(
+                java.util.Arrays.asList(base, split),
+                java.util.Arrays.asList("base", "split_config.test"),
+                OLD_PKG, NEW_PKG, null, 26, java.util.Collections.emptyList(),
+                Files.createTempDirectory("mod").toFile(), log);
+        assertEquals(2, r.replacementsPerApk.size());
+        for (java.util.Map<String, File> repl : r.replacementsPerApk) {
+            AxmlFile m = AxmlFile.parse(Files.readAllBytes(
+                    repl.get("AndroidManifest.xml").toPath()));
+            assertEquals(NEW_PKG, m.getManifestPackage());
+        }
+        assertNotEquals("each APK gets its own output files",
+                r.replacementsPerApk.get(0).get("AndroidManifest.xml"),
+                r.replacementsPerApk.get(1).get("AndroidManifest.xml"));
+
+        // A "split" whose manifest belongs to another package.
+        AxmlFile foreign = AxmlFile.parse(Files.readAllBytes(split.manifestFile.toPath()));
+        foreign.renamePackage(OLD_PKG, "org.someone.else");
+        Files.write(split.manifestFile.toPath(), foreign.toByteArray());
+        try {
+            new PackageTransformer().transformSet(java.util.Arrays.asList(base, split),
+                    java.util.Arrays.asList("base", "split_config.test"), OLD_PKG, NEW_PKG,
+                    null, 26, java.util.Collections.emptyList(),
+                    Files.createTempDirectory("mod2").toFile(), log);
+            throw new AssertionError("foreign split must be rejected");
+        } catch (PipelineException expected) {
+            assertTrue(expected.getMessage(), expected.getMessage().contains("not one app's"));
+        }
+    }
+
     private static int u32(byte[] b, int off) {
         return (b[off] & 0xFF) | ((b[off + 1] & 0xFF) << 8) | ((b[off + 2] & 0xFF) << 16)
                 | ((b[off + 3] & 0xFF) << 24);

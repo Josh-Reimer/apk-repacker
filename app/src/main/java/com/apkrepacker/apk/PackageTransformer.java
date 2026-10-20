@@ -11,18 +11,23 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Stage 3/4/5 orchestrator: given the decoded manifest and DEX files, produce the set of
- * replacement entries (by ZIP entry name) that carry the new package identity.
+ * Stage 3/4/5 orchestrator: given the decoded APK set (base first, then any splits), produce
+ * per-APK replacement entries (by ZIP entry name) that carry the new package identity.
  *
- * <p>Binary XML under res/ is rewritten only where a pooled string names a class the DEX
- * step renamed (custom views, fragments, preferences). resources.arsc, assets, and native
- * libraries are intentionally left untouched and copied verbatim at rebuild time.
+ * <p>A split set is transformed as one unit: every APK's manifest gets the new package, DEX
+ * in any APK is remapped with the same rules, and resource XML in any APK follows classes
+ * renamed in any other (a base layout may inflate a view defined in a feature split).
+ * Binary XML under res/ is rewritten only where a pooled string names a class the DEX step
+ * renamed; resources.arsc only for provider authorities declared by reference. Assets and
+ * native libraries are copied verbatim at rebuild time.
  */
 public final class PackageTransformer {
 
     public static final class Result {
-        /** ZIP entry name -> file containing its new bytes. */
+        /** Base APK: ZIP entry name -> file containing its new bytes. */
         public final Map<String, File> replacements;
+        /** Same as {@link #replacements}, for every APK in the set (index 0 = base). */
+        public final List<Map<String, File>> replacementsPerApk;
         public final int manifestStringsChanged;
         public final int dexTypesRemapped;
         public final int resXmlStringsChanged;
@@ -31,12 +36,13 @@ public final class PackageTransformer {
         /** Every provider authority the output declares differently from the original. */
         public final Map<String, String> authorityRenames;
 
-        Result(Map<String, File> replacements, int manifestStringsChanged,
+        Result(List<Map<String, File>> replacementsPerApk, int manifestStringsChanged,
                int dexTypesRemapped, int resXmlStringsChanged,
                String detectedOldPackage, boolean labelChanged,
                Map<String, String> authorityRenames) {
+            this.replacementsPerApk = replacementsPerApk;
+            this.replacements = replacementsPerApk.get(0);
             this.authorityRenames = authorityRenames;
-            this.replacements = replacements;
             this.manifestStringsChanged = manifestStringsChanged;
             this.dexTypesRemapped = dexTypesRemapped;
             this.resXmlStringsChanged = resXmlStringsChanged;
@@ -60,12 +66,6 @@ public final class PackageTransformer {
                 java.util.Collections.emptyList(), outDir, log);
     }
 
-    /**
-     * @param installedAuthorities the original app's provider authorities as resolved by
-     *                             PackageManager. Needed because a manifest may declare an
-     *                             authority by resource reference ({@code @string/...}), whose
-     *                             value lives in resources.arsc rather than the manifest.
-     */
     public Result transform(ApkDecoder.Decoded decoded,
                             String declaredOldPackage,
                             String newPackage,
@@ -74,66 +74,107 @@ public final class PackageTransformer {
                             List<String> installedAuthorities,
                             File outDir,
                             BuildLog log) throws PipelineException {
-        Map<String, File> replacements = new HashMap<>();
+        return transformSet(java.util.Collections.singletonList(decoded),
+                java.util.Collections.singletonList("base"), declaredOldPackage, newPackage,
+                newLabel, minSdk, installedAuthorities, outDir, log);
+    }
 
-        // ---- Manifest: read true package, rename pooled strings ----
-        String oldPackage;
-        int manifestChanged;
+    /**
+     * @param apks                 base first, then splits
+     * @param apkNames             display names for the log ("base", "split_config.arm64_v8a")
+     * @param installedAuthorities the original app's provider authorities as resolved by
+     *                             PackageManager. Needed because a manifest may declare an
+     *                             authority by resource reference ({@code @string/...}), whose
+     *                             value lives in resources.arsc rather than the manifest.
+     */
+    public Result transformSet(List<ApkDecoder.Decoded> apks,
+                               List<String> apkNames,
+                               String declaredOldPackage,
+                               String newPackage,
+                               String newLabel,
+                               int minSdk,
+                               List<String> installedAuthorities,
+                               File outDir,
+                               BuildLog log) throws PipelineException {
+        List<Map<String, File>> replacements = new java.util.ArrayList<>();
+        List<File> outDirs = new java.util.ArrayList<>();
+        for (int i = 0; i < apks.size(); i++) {
+            replacements.add(new HashMap<>());
+            // The base keeps outDir itself so single-APK output paths are unchanged.
+            File d = i == 0 ? outDir : new File(outDir, "apk-" + i);
+            //noinspection ResultOfMethodCallIgnored
+            d.mkdirs();
+            outDirs.add(d);
+        }
+
+        // ---- Manifests: read true package from the base, rename pooled strings in all ----
+        String oldPackage = null;
+        int manifestChanged = 0;
         boolean labelChanged = false;
-        // Old -> new provider authority, for the manifest's renamed authorities only.
+        // Old -> new provider authority, for the manifests' renamed authorities only.
         Map<String, String> authorityRenames = new java.util.LinkedHashMap<>();
-        File newManifest = new File(outDir, "AndroidManifest.xml");
-        try {
-            byte[] bytes = Files.readAllBytes(decoded.manifestFile.toPath());
-            AxmlFile axml = AxmlFile.parse(bytes);
-            oldPackage = axml.getManifestPackage();
-            log.info("Manifest declares package: " + oldPackage);
-            if (declaredOldPackage != null && !declaredOldPackage.equals(oldPackage)) {
-                log.warn("Analyzer reported '" + declaredOldPackage
-                        + "' but manifest says '" + oldPackage + "'; using the manifest value.");
-            }
-            if (oldPackage.equals(newPackage)) {
-                throw new PipelineException(Stage.TRANSFORM,
-                        "New package name is identical to the original (" + oldPackage + ").");
-            }
-            List<Integer> authIdx =
-                    axml.getAttrStringIndices("provider", AxmlFile.ATTR_AUTHORITIES);
-            List<String> oldAuths = new java.util.ArrayList<>();
-            for (int idx : authIdx) {
-                oldAuths.add(axml.strings().get(idx));
-            }
-            manifestChanged = axml.renamePackage(oldPackage, newPackage);
-            for (int i = 0; i < authIdx.size(); i++) {
-                // android:authorities may list several, separated by ';'.
-                String[] before = oldAuths.get(i).split(";");
-                String[] after = axml.strings().get(authIdx.get(i)).split(";");
-                for (int j = 0; j < before.length && j < after.length; j++) {
-                    if (!before[j].equals(after[j])) {
-                        authorityRenames.put(before[j], after[j]);
+        for (int a = 0; a < apks.size(); a++) {
+            String apkName = apkNames.get(a);
+            try {
+                AxmlFile axml = AxmlFile.parse(
+                        Files.readAllBytes(apks.get(a).manifestFile.toPath()));
+                String pkg = axml.getManifestPackage();
+                if (a == 0) {
+                    oldPackage = pkg;
+                    log.info("Manifest declares package: " + oldPackage);
+                    if (declaredOldPackage != null && !declaredOldPackage.equals(oldPackage)) {
+                        log.warn("Analyzer reported '" + declaredOldPackage + "' but manifest "
+                                + "says '" + oldPackage + "'; using the manifest value.");
+                    }
+                    if (oldPackage.equals(newPackage)) {
+                        throw new PipelineException(Stage.TRANSFORM, "New package name is "
+                                + "identical to the original (" + oldPackage + ").");
+                    }
+                } else if (!oldPackage.equals(pkg)) {
+                    throw new PipelineException(Stage.TRANSFORM, "Split " + apkName
+                            + " declares package '" + pkg + "' but the base declares '"
+                            + oldPackage + "'; this is not one app's split set.");
+                }
+                List<Integer> authIdx =
+                        axml.getAttrStringIndices("provider", AxmlFile.ATTR_AUTHORITIES);
+                List<String> oldAuths = new java.util.ArrayList<>();
+                for (int idx : authIdx) {
+                    oldAuths.add(axml.strings().get(idx));
+                }
+                int changed = axml.renamePackage(oldPackage, newPackage);
+                manifestChanged += changed;
+                for (int i = 0; i < authIdx.size(); i++) {
+                    // android:authorities may list several, separated by ';'.
+                    String[] before = oldAuths.get(i).split(";");
+                    String[] after = axml.strings().get(authIdx.get(i)).split(";");
+                    for (int j = 0; j < before.length && j < after.length; j++) {
+                        if (!before[j].equals(after[j])) {
+                            authorityRenames.put(before[j], after[j]);
+                        }
                     }
                 }
-            }
-            if (newLabel != null && !newLabel.trim().isEmpty()) {
-                labelChanged = axml.setApplicationLabel(newLabel.trim());
-                if (labelChanged) {
-                    log.info("Manifest: set application display name to \"" + newLabel.trim()
-                            + "\" (components with their own label keep it).");
-                } else {
-                    log.warn("Manifest: <application> has no label attribute; display name "
-                            + "left unchanged.");
+                if (a == 0 && newLabel != null && !newLabel.trim().isEmpty()) {
+                    labelChanged = axml.setApplicationLabel(newLabel.trim());
+                    if (labelChanged) {
+                        log.info("Manifest: set application display name to \""
+                                + newLabel.trim() + "\" (components with their own label keep it).");
+                    } else {
+                        log.warn("Manifest: <application> has no label attribute; display "
+                                + "name left unchanged.");
+                    }
                 }
+                File newManifest = new File(outDirs.get(a), "AndroidManifest.xml");
+                Files.write(newManifest.toPath(), axml.toByteArray());
+                log.info("Manifest (" + apkName + "): rewrote " + changed + " pooled string(s); "
+                        + "relative component names (\".Foo\") resolve under the new package.");
+                replacements.get(a).put("AndroidManifest.xml", newManifest);
+            } catch (AxmlException e) {
+                throw new PipelineException(Stage.TRANSFORM, "The " + apkName + " APK contains "
+                        + "an unsupported binary manifest structure: " + e.getMessage(), e);
+            } catch (IOException e) {
+                throw new PipelineException(Stage.TRANSFORM,
+                        "Failed to read/write the " + apkName + " manifest: " + e.getMessage(), e);
             }
-            Files.write(newManifest.toPath(), axml.toByteArray());
-            log.info("Manifest: rewrote " + manifestChanged + " pooled string(s); "
-                    + "relative component names (\".Foo\") resolve under the new package.");
-            replacements.put("AndroidManifest.xml", newManifest);
-        } catch (AxmlException e) {
-            throw new PipelineException(Stage.TRANSFORM,
-                    "The APK contains an unsupported binary manifest structure: "
-                            + e.getMessage(), e);
-        } catch (IOException e) {
-            throw new PipelineException(Stage.TRANSFORM,
-                    "Failed to read/write the manifest: " + e.getMessage(), e);
         }
 
         // ---- Authorities defined in resources (android:authorities="@string/...") ----
@@ -141,7 +182,7 @@ public final class PackageTransformer {
         for (String declared : installedAuthorities) {
             for (String a : declared.split(";")) {
                 if (authorityRenames.containsKey(a) || authorityRenames.containsValue(a)) {
-                    continue; // inline in the manifest; already renamed above
+                    continue; // inline in a manifest; already renamed above
                 }
                 if (a.equals(oldPackage) || a.startsWith(oldPackage + ".")) {
                     arscRenames.put(a, newPackage + a.substring(oldPackage.length()));
@@ -149,11 +190,11 @@ public final class PackageTransformer {
             }
         }
         if (!arscRenames.isEmpty()) {
-            renameResourceAuthorities(decoded, arscRenames, outDir, replacements, log);
+            renameResourceAuthorities(apks, apkNames, arscRenames, outDirs, replacements, log);
             authorityRenames.putAll(arscRenames);
         }
 
-        // ---- DEX: conservative type-descriptor remap ----
+        // ---- DEX: conservative type-descriptor remap, across the whole set ----
         // Only run the (heavy) dexlib2 rebuild on DEX files that actually mention the old
         // package. A DEX with no occurrence of the old internal path cannot contain a type
         // to remap, so we skip it and let ApkBuilder copy the original entry verbatim. This
@@ -167,26 +208,29 @@ public final class PackageTransformer {
         // provider — so exactly those literals follow the manifest. Nothing else does.
         byte[] dottedNeedle = oldPackage.getBytes(java.nio.charset.StandardCharsets.UTF_8);
         DexTransformer dex = new DexTransformer(oldPackage, newPackage, minSdk, authorityRenames);
-        List<File> dexFiles = decoded.dexFiles;
-        List<String> dexNames = decoded.dexEntryNames;
-        for (int i = 0; i < dexFiles.size(); i++) {
-            File in = dexFiles.get(i);
-            String name = dexNames.get(i);
-            try {
-                byte[] bytes = Files.readAllBytes(in.toPath());
-                if (!containsBytes(bytes, needle) && (authorityRenames.isEmpty()
-                        || !containsBytes(bytes, dottedNeedle))) {
-                    log.info("DEX " + name + ": no reference to the old package; copied as-is.");
-                    continue;
+        for (int a = 0; a < apks.size(); a++) {
+            List<File> dexFiles = apks.get(a).dexFiles;
+            List<String> dexNames = apks.get(a).dexEntryNames;
+            String prefix = a == 0 ? "" : apkNames.get(a) + "!";
+            for (int i = 0; i < dexFiles.size(); i++) {
+                File in = dexFiles.get(i);
+                String name = dexNames.get(i);
+                try {
+                    byte[] bytes = Files.readAllBytes(in.toPath());
+                    if (!containsBytes(bytes, needle) && (authorityRenames.isEmpty()
+                            || !containsBytes(bytes, dottedNeedle))) {
+                        log.info("DEX " + prefix + name
+                                + ": no reference to the old package; copied as-is.");
+                        continue;
+                    }
+                } catch (IOException e) {
+                    throw new PipelineException(Stage.TRANSFORM,
+                            "Failed to scan " + prefix + name + ": " + e.getMessage(), e);
                 }
-            } catch (IOException e) {
-                throw new PipelineException(Stage.TRANSFORM,
-                        "Failed to scan " + name + ": " + e.getMessage(), e);
+                File out = new File(outDirs.get(a), name);
+                totalRemapped += dex.rewrite(in, out, log);
+                replacements.get(a).put(name, out);
             }
-            File out = new File(outDir, name);
-            int n = dex.rewrite(in, out, log);
-            totalRemapped += n;
-            replacements.put(name, out);
         }
 
         for (Map.Entry<String, String> a : authorityRenames.entrySet()) {
@@ -203,55 +247,75 @@ public final class PackageTransformer {
                     + "code references were left unchanged.");
         }
 
-        int resXmlChanged = rewriteResourceXml(decoded, oldPackage, newPackage,
-                dex.renamedClasses(), outDir, replacements, log);
+        int resXmlChanged = 0;
+        for (int a = 0; a < apks.size(); a++) {
+            resXmlChanged += rewriteResourceXml(apks.get(a), apkNames.get(a), oldPackage,
+                    newPackage, dex.renamedClasses(), outDirs.get(a), replacements.get(a), log);
+        }
 
         return new Result(replacements, manifestChanged, totalRemapped, resXmlChanged,
                 oldPackage, labelChanged, authorityRenames);
     }
 
     /**
-     * Rewrites exact string values in resources.arsc's global pool for authorities that the
+     * Rewrites exact string values in resources.arsc's global pool for authorities that a
      * manifest declares by resource reference. Exact matches only: the pool slot holding
      * "com.example.original.provider" is that value wherever it's used, and nothing that
-     * merely starts with the package is touched.
+     * merely starts with the package is touched. In a split set, each APK's table is checked;
+     * every authority must be found in at least one of them.
      */
-    private static void renameResourceAuthorities(ApkDecoder.Decoded decoded,
-                                                  Map<String, String> renames, File outDir,
-                                                  Map<String, File> replacements,
+    private static void renameResourceAuthorities(List<ApkDecoder.Decoded> apks,
+                                                  List<String> apkNames,
+                                                  Map<String, String> renames,
+                                                  List<File> outDirs,
+                                                  List<Map<String, File>> replacements,
                                                   BuildLog log) throws PipelineException {
-        if (decoded.resourcesArsc == null) {
-            throw new PipelineException(Stage.TRANSFORM, "Provider authorities "
-                    + renames.keySet() + " are not inline in the manifest, and the APK has "
-                    + "no resources.arsc to rename them in.");
-        }
-        try {
-            com.apkrepacker.apk.axml.ArscFile arsc = com.apkrepacker.apk.axml.ArscFile.parse(
-                    Files.readAllBytes(decoded.resourcesArsc.toPath()));
-            java.util.Set<String> pool = new java.util.HashSet<>(arsc.strings());
-            for (String a : renames.keySet()) {
-                if (!pool.contains(a)) {
-                    throw new PipelineException(Stage.TRANSFORM, "Provider authority " + a
-                            + " is defined by a resource that could not be located in "
-                            + "resources.arsc. Renaming it is required to avoid a provider "
-                            + "conflict with the original app.");
+        java.util.Set<String> found = new java.util.HashSet<>();
+        for (int a = 0; a < apks.size(); a++) {
+            File arscIn = apks.get(a).resourcesArsc;
+            if (arscIn == null) {
+                continue;
+            }
+            try {
+                com.apkrepacker.apk.axml.ArscFile arsc = com.apkrepacker.apk.axml.ArscFile
+                        .parse(Files.readAllBytes(arscIn.toPath()));
+                java.util.Set<String> pool = new java.util.HashSet<>(arsc.strings());
+                Map<String, String> here = new java.util.LinkedHashMap<>();
+                for (Map.Entry<String, String> r : renames.entrySet()) {
+                    if (pool.contains(r.getKey())) {
+                        here.put(r.getKey(), r.getValue());
+                    }
                 }
+                if (here.isEmpty()) {
+                    continue;
+                }
+                found.addAll(here.keySet());
+                int changed = arsc.renameExact(here);
+                File out = new File(outDirs.get(a), "resources.arsc");
+                Files.write(out.toPath(), arsc.toByteArray());
+                replacements.get(a).put("resources.arsc", out);
+                for (Map.Entry<String, String> r : here.entrySet()) {
+                    log.info("resources.arsc (" + apkNames.get(a) + "): authority "
+                            + r.getKey() + " -> " + r.getValue());
+                }
+                log.info("resources.arsc (" + apkNames.get(a) + "): rewrote " + changed
+                        + " pooled string value(s); resource IDs and all other values are "
+                        + "unchanged.");
+            } catch (AxmlException e) {
+                throw new PipelineException(Stage.TRANSFORM, "Unsupported resources.arsc "
+                        + "structure in " + apkNames.get(a) + ": " + e.getMessage(), e);
+            } catch (IOException e) {
+                throw new PipelineException(Stage.TRANSFORM, "Failed to rewrite "
+                        + apkNames.get(a) + " resources.arsc: " + e.getMessage(), e);
             }
-            int changed = arsc.renameExact(renames);
-            File out = new File(outDir, "resources.arsc");
-            Files.write(out.toPath(), arsc.toByteArray());
-            replacements.put("resources.arsc", out);
-            for (Map.Entry<String, String> a : renames.entrySet()) {
-                log.info("resources.arsc: authority " + a.getKey() + " -> " + a.getValue());
+        }
+        for (String a : renames.keySet()) {
+            if (!found.contains(a)) {
+                throw new PipelineException(Stage.TRANSFORM, "Provider authority " + a
+                        + " is defined by a resource that could not be located in any "
+                        + "resources.arsc. Renaming it is required to avoid a provider "
+                        + "conflict with the original app.");
             }
-            log.info("resources.arsc: rewrote " + changed + " pooled string value(s); "
-                    + "resource IDs and all other values are unchanged.");
-        } catch (AxmlException e) {
-            throw new PipelineException(Stage.TRANSFORM,
-                    "Unsupported resources.arsc structure: " + e.getMessage(), e);
-        } catch (IOException e) {
-            throw new PipelineException(Stage.TRANSFORM,
-                    "Failed to rewrite resources.arsc: " + e.getMessage(), e);
         }
     }
 
@@ -262,7 +326,8 @@ public final class PackageTransformer {
      * ClassNotFoundException unless these strings follow. Only exact names of renamed classes
      * are rewritten; any other string that merely starts with the old package is kept.
      */
-    private static int rewriteResourceXml(ApkDecoder.Decoded decoded, String oldPackage,
+    private static int rewriteResourceXml(ApkDecoder.Decoded decoded, String apkName,
+                                          String oldPackage,
                                           String newPackage, java.util.Set<String> renamed,
                                           File outDir, Map<String, File> replacements,
                                           BuildLog log) throws PipelineException {
@@ -317,8 +382,8 @@ public final class PackageTransformer {
                         "Failed to rewrite " + name + ": " + e.getMessage(), e);
             }
         }
-        log.info("Resource XML: renamed " + totalChanged + " class reference(s) in "
-                + filesChanged + " file(s).");
+        log.info("Resource XML (" + apkName + "): renamed " + totalChanged
+                + " class reference(s) in " + filesChanged + " file(s).");
         return totalChanged;
     }
 

@@ -5,6 +5,8 @@ import java.io.File;
 /** Outputs of a successful repackage run. */
 public final class RepackageResult {
     public final File outputApk;
+    /** Signed split APKs to install together with {@link #outputApk}; empty if none. */
+    public final java.util.List<File> splitApks;
     public final String newPackage;
     public final String originalPackage;
     public final ApkVerifier.VerifyResult verification;
@@ -18,13 +20,14 @@ public final class RepackageResult {
     public final String newLabel;
     public final int iconsWatermarked;
 
-    public RepackageResult(File outputApk, String newPackage, String originalPackage,
+    public RepackageResult(File outputApk, java.util.List<File> splitApks, String newPackage, String originalPackage,
                            ApkVerifier.VerifyResult verification,
                            int manifestStringsChanged, int dexTypesRemapped,
                            int resXmlStringsChanged, java.util.List<String> providerConflicts,
                            String signerDescription,
                            boolean labelChanged, String newLabel, int iconsWatermarked) {
         this.outputApk = outputApk;
+        this.splitApks = splitApks;
         this.newPackage = newPackage;
         this.originalPackage = originalPackage;
         this.verification = verification;

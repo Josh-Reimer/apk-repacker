@@ -29,6 +29,8 @@ public final class ApkExtractor {
         public final String originalPackage;
         public final File baseApk;        // the copied base APK (our writable input)
         public final List<File> splits;   // copied split APKs, if any
+        /** File names for {@link #splits}, as installed (e.g. "split_config.arm64_v8a"). */
+        public final List<String> splitNames;
         public final boolean hasSplits;
         /**
          * Native libraries the installed app loads from outside its APK, keyed by the APK
@@ -38,10 +40,11 @@ public final class ApkExtractor {
         public final Map<String, File> externalNativeLibs;
 
         Extracted(String originalPackage, File baseApk, List<File> splits,
-                  Map<String, File> externalNativeLibs) {
+                  List<String> splitNames, Map<String, File> externalNativeLibs) {
             this.originalPackage = originalPackage;
             this.baseApk = baseApk;
             this.splits = splits;
+            this.splitNames = splitNames;
             this.hasSplits = !splits.isEmpty();
             this.externalNativeLibs = Collections.unmodifiableMap(externalNativeLibs);
         }
@@ -82,6 +85,7 @@ public final class ApkExtractor {
             log.info("Copied base APK from " + ai.sourceDir + " (" + baseCopy.length() + " bytes)");
 
             List<File> splitCopies = new ArrayList<>();
+            List<String> splitNames = new ArrayList<>();
             String[] splitDirs = ai.splitSourceDirs;
             if (splitDirs != null) {
                 for (int i = 0; i < splitDirs.length; i++) {
@@ -89,19 +93,22 @@ public final class ApkExtractor {
                     File dst = new File(workDir, "split-" + i + "-original.apk");
                     copy(s, dst, log);
                     splitCopies.add(dst);
-                    log.warn("Split APK detected and copied: " + s.getName());
+                    String name = s.getName();
+                    splitNames.add(name.endsWith(".apk")
+                            ? name.substring(0, name.length() - 4) : name);
+                    log.info("Copied split APK: " + name + " (" + dst.length() + " bytes)");
                 }
             }
 
             if (!splitCopies.isEmpty()) {
-                log.warn("This application uses " + splitCopies.size()
-                        + " split APK(s). The base APK is NOT a complete standalone app; "
-                        + "a full repackage would require processing the entire split set.");
+                log.info("This application is a split set: base + " + splitCopies.size()
+                        + " split(s). All of them are renamed and signed together and must be "
+                        + "installed together.");
             }
 
             Map<String, File> nativeLibs = copyExternalNativeLibs(ai, baseCopy, workDir, log);
 
-            return new Extracted(packageName, baseCopy, splitCopies, nativeLibs);
+            return new Extracted(packageName, baseCopy, splitCopies, splitNames, nativeLibs);
         } catch (PackageManager.NameNotFoundException e) {
             throw new PipelineException(Stage.EXTRACT,
                     "No installed application with package name: " + packageName, e);

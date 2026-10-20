@@ -1,9 +1,17 @@
 package com.apkrepacker.ui;
 
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.content.pm.PackageInstaller;
+import android.os.Build;
 import android.os.Bundle;
 import android.view.View;
 
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.content.ContextCompat;
+import androidx.core.content.IntentCompat;
 
 import com.apkrepacker.apk.BuildLog;
 import com.apkrepacker.apk.PipelineException;
@@ -15,7 +23,9 @@ import com.apkrepacker.apk.Stage;
 import com.apkrepacker.databinding.ActivityResultBinding;
 
 import java.io.File;
+import java.util.ArrayList;
 import java.util.EnumMap;
+import java.util.List;
 import java.util.Map;
 
 /** Runs one repackage pipeline off the UI thread and renders live stage + log output. */
@@ -32,6 +42,8 @@ public final class ResultActivity extends AppCompatActivity {
     private ActivityResultBinding binding;
     private final Map<Stage, Character> stageState = new EnumMap<>(Stage.class);
     private File outputApk;
+    private List<File> splitApks = new ArrayList<>();
+    private BroadcastReceiver installStatusReceiver;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -48,17 +60,29 @@ public final class ResultActivity extends AppCompatActivity {
         binding.txtStatus.setText("Starting…");
 
         binding.btnInstall.setOnClickListener(v -> {
-            if (outputApk != null) {
+            if (outputApk == null) {
+                return;
+            }
+            if (splitApks.isEmpty()) {
                 try {
                     Installer.launchInstall(this, outputApk);
                 } catch (Exception e) {
                     appendLog("Install launch failed: " + e.getMessage());
                 }
+                return;
             }
+            installSplitSet();
         });
+
+        registerInstallStatusReceiver();
 
         String original = getIntent().getStringExtra(EXTRA_ORIGINAL);
         String newPkg = getIntent().getStringExtra(EXTRA_NEW);
+        if (newPkg == null) {
+            // Not a repackage launch (e.g. the activity was recreated); nothing to run.
+            binding.txtStatus.setText("");
+            return;
+        }
         int minSdk = getIntent().getIntExtra(EXTRA_MIN_SDK, 0);
         boolean keep = getIntent().getBooleanExtra(EXTRA_KEEP, false);
         String label = getIntent().getStringExtra(EXTRA_LABEL);
@@ -66,6 +90,70 @@ public final class ResultActivity extends AppCompatActivity {
         String watermarkText = getIntent().getStringExtra(EXTRA_WATERMARK_TEXT);
 
         runPipeline(original, newPkg, minSdk, keep, label, watermark, watermarkText);
+    }
+
+    private void installSplitSet() {
+        List<File> set = new ArrayList<>();
+        set.add(outputApk);
+        set.addAll(splitApks);
+        binding.btnInstall.setEnabled(false);
+        appendLog("Install: writing base + " + splitApks.size()
+                + " split APK(s) into an install session…");
+        new Thread(() -> {
+            try {
+                Installer.installSplitSet(getApplicationContext(), set);
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    appendLog("Install failed: " + e.getMessage());
+                    binding.btnInstall.setEnabled(true);
+                });
+            }
+        }).start();
+    }
+
+    private void registerInstallStatusReceiver() {
+        installStatusReceiver = new BroadcastReceiver() {
+            @Override public void onReceive(Context context, Intent intent) {
+                onInstallStatus(intent);
+            }
+        };
+        IntentFilter filter = new IntentFilter(Installer.ACTION_INSTALL_STATUS);
+        ContextCompat.registerReceiver(this, installStatusReceiver, filter,
+                ContextCompat.RECEIVER_NOT_EXPORTED);
+    }
+
+    private void onInstallStatus(Intent intent) {
+        int status = intent.getIntExtra(PackageInstaller.EXTRA_STATUS,
+                PackageInstaller.STATUS_FAILURE);
+        if (status == PackageInstaller.STATUS_PENDING_USER_ACTION) {
+            // The system's confirmation screen; the user approves or declines there.
+            Intent confirm = IntentCompat.getParcelableExtra(intent, Intent.EXTRA_INTENT,
+                    Intent.class);
+            if (confirm != null) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                }
+                startActivity(confirm);
+            }
+            return;
+        }
+        String message = intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE);
+        if (status == PackageInstaller.STATUS_SUCCESS) {
+            appendLog("Install: split set installed.");
+            binding.txtStatus.setText("✓ Installed");
+        } else {
+            appendLog("Install failed (status " + status + "): " + message);
+            binding.btnInstall.setEnabled(true);
+        }
+    }
+
+    @Override
+    protected void onDestroy() {
+        if (installStatusReceiver != null) {
+            unregisterReceiver(installStatusReceiver);
+            installStatusReceiver = null;
+        }
+        super.onDestroy();
     }
 
     private void runPipeline(String original, String newPkg, int minSdk, boolean keep,
@@ -103,6 +191,7 @@ public final class ResultActivity extends AppCompatActivity {
 
     private void onSuccess(RepackageResult r) {
         outputApk = r.outputApk;
+        splitApks = r.splitApks;
         StringBuilder sb = new StringBuilder();
         sb.append("Package:\n").append(r.newPackage).append("\n\n");
         sb.append("Original package:\n").append(r.originalPackage).append("\n\n");
@@ -117,6 +206,13 @@ public final class ResultActivity extends AppCompatActivity {
         sb.append("Signing key:\n").append(r.signerDescription).append("\n\n");
         sb.append("APK:\n").append(r.outputApk.getName()).append("\n")
                 .append(r.outputApk.getAbsolutePath()).append("\n\n");
+        if (!r.splitApks.isEmpty()) {
+            sb.append("Split APKs (installed together with the base):\n");
+            for (File f : r.splitApks) {
+                sb.append("  ").append(f.getName()).append('\n');
+            }
+            sb.append('\n');
+        }
         sb.append("Manifest strings changed: ").append(r.manifestStringsChanged).append('\n');
         sb.append("DEX type refs remapped: ").append(r.dexTypesRemapped).append('\n');
         sb.append("Resource XML class refs: ").append(r.resXmlStringsChanged).append("\n\n");

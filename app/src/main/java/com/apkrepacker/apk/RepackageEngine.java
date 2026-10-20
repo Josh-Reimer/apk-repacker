@@ -46,6 +46,11 @@ public final class RepackageEngine {
             for (String abi : extracted.externalNativeAbis()) {
                 analysis.nativeAbis.add(abi + " (outside APK)");
             }
+            for (String abi : splitNativeAbis(extracted)) {
+                if (!analysis.nativeAbis.contains(abi)) {
+                    analysis.nativeAbis.add(abi + " (split)");
+                }
+            }
             if (!extracted.externalNativeLibs.isEmpty()) {
                 analysis.potentialIssues.add("Native libraries are installed outside the APK "
                         + "(typical of preinstalled apps); they will be bundled into the output.");
@@ -54,6 +59,28 @@ public final class RepackageEngine {
         } finally {
             ApkStorage.deleteTree(workDir);
         }
+    }
+
+    /** ABIs whose native libraries ship in split APKs (e.g. split_config.arm64_v8a). */
+    private static List<String> splitNativeAbis(ApkExtractor.Extracted extracted) {
+        List<String> abis = new java.util.ArrayList<>();
+        for (File split : extracted.splits) {
+            try (java.util.zip.ZipFile zip = new java.util.zip.ZipFile(split)) {
+                java.util.Enumeration<? extends java.util.zip.ZipEntry> e = zip.entries();
+                while (e.hasMoreElements()) {
+                    String n = e.nextElement().getName();
+                    if (n.startsWith("lib/") && n.endsWith(".so")) {
+                        String abi = n.split("/")[1];
+                        if (!abis.contains(abi)) {
+                            abis.add(abi);
+                        }
+                    }
+                }
+            } catch (java.io.IOException ignored) {
+                // Analysis is informational; extraction/decoding report real failures.
+            }
+        }
+        return abis;
     }
 
     /** The original app's provider authorities, resolved by PackageManager. */
@@ -135,9 +162,6 @@ public final class RepackageEngine {
             progress.onStageStart(Stage.EXTRACT);
             ApkExtractor.Extracted extracted =
                     new ApkExtractor(context).extract(req.originalPackage, workDir, log);
-            if (extracted.hasSplits) {
-                log.warn("Proceeding with the BASE APK only; split APKs are not merged.");
-            }
             progress.onStageDone(Stage.EXTRACT);
 
             // ---- Stage: validate the APK itself ----
@@ -150,16 +174,26 @@ public final class RepackageEngine {
 
             // ---- Stage: decode ----
             progress.onStageStart(Stage.DECODE);
-            ApkDecoder.Decoded decoded =
-                    new ApkDecoder().decode(extracted.baseApk, decodeDir, log);
+            // Index 0 is the base; splits follow in install order.
+            List<File> inputs = new java.util.ArrayList<>();
+            List<String> names = new java.util.ArrayList<>();
+            inputs.add(extracted.baseApk);
+            names.add("base");
+            inputs.addAll(extracted.splits);
+            names.addAll(extracted.splitNames);
+            List<ApkDecoder.Decoded> decodedSet = new java.util.ArrayList<>();
+            for (int i = 0; i < inputs.size(); i++) {
+                File dir = new File(decodeDir, "apk-" + i);
+                decodedSet.add(new ApkDecoder().decode(inputs.get(i), dir, log));
+            }
             progress.onStageDone(Stage.DECODE);
 
             // ---- Stage: transform (manifest + dex + optional display name & icon) ----
             progress.onStageStart(Stage.TRANSFORM);
             List<String> originalAuthorities = installedAuthorities(req.originalPackage);
-            PackageTransformer.Result transform = new PackageTransformer().transform(
-                    decoded, analysis.packageName, req.newPackage, req.newLabel, minSdk,
-                    originalAuthorities, modDir, log);
+            PackageTransformer.Result transform = new PackageTransformer().transformSet(
+                    decodedSet, names, analysis.packageName, req.newPackage, req.newLabel,
+                    minSdk, originalAuthorities, modDir, log);
             List<String> conflicts = providerConflicts(originalAuthorities,
                     transform.authorityRenames, req.originalPackage, log);
 
@@ -175,9 +209,16 @@ public final class RepackageEngine {
 
             // ---- Stage: rebuild (also aligns) ----
             progress.onStageStart(Stage.REBUILD);
-            File unsigned = new File(workDir, "unsigned.apk");
-            new ApkBuilder().build(extracted.baseApk, transform.replacements,
-                    extracted.externalNativeLibs, unsigned, log);
+            List<File> unsignedSet = new java.util.ArrayList<>();
+            for (int i = 0; i < inputs.size(); i++) {
+                File unsigned = new File(workDir, i == 0 ? "unsigned.apk"
+                        : "unsigned-" + i + ".apk");
+                Map<String, File> additions = i == 0 ? extracted.externalNativeLibs
+                        : java.util.Collections.emptyMap();
+                new ApkBuilder().build(inputs.get(i), transform.replacementsPerApk.get(i),
+                        additions, unsigned, log);
+                unsignedSet.add(unsigned);
+            }
             progress.onStageDone(Stage.REBUILD);
 
             // ---- Stage: zipalign (performed during rebuild; recorded explicitly) ----
@@ -203,30 +244,60 @@ public final class RepackageEngine {
                 throw new PipelineException(Stage.SIGN,
                         "Output location is not writable: " + e.getMessage(), e);
             }
-            File signed = new File(outputsDir,
-                    safeFileName(req.newPackage) + ".apk");
+            // A single APK keeps the flat outputs/<pkg>.apk; a split set gets its own folder
+            // (outputs/<pkg>/base.apk, split_*.apk), replaced wholesale on each run.
+            List<File> signedSet = new java.util.ArrayList<>();
+            if (inputs.size() == 1) {
+                signedSet.add(new File(outputsDir, safeFileName(req.newPackage) + ".apk"));
+            } else {
+                File setDir = new File(outputsDir, safeFileName(req.newPackage));
+                ApkStorage.deleteTree(setDir);
+                if (!setDir.mkdirs()) {
+                    throw new PipelineException(Stage.SIGN,
+                            "Output location is not writable: " + setDir);
+                }
+                for (String n : names) {
+                    signedSet.add(new File(setDir, safeFileName(n) + ".apk"));
+                }
+            }
+            File signed = signedSet.get(0);
             int signingMinSdk = ApkSigner.signingMinSdk(minSdk);
             if (signingMinSdk != minSdk) {
                 log.info("App declares minSdk " + minSdk + "; signing for API " + signingMinSdk
                         + "+ so the v1 signature uses SHA-256 (output won't install below "
                         + "Android 4.3).");
             }
-            new ApkSigner().sign(unsigned, signed, identity, signingMinSdk, log);
+            // Android requires every APK of a split set to carry the same signing certificate.
+            for (int i = 0; i < inputs.size(); i++) {
+                new ApkSigner().sign(unsignedSet.get(i), signedSet.get(i), identity,
+                        signingMinSdk, log);
+            }
             progress.onStageDone(Stage.SIGN);
 
             // ---- Stage: verify ----
             progress.onStageStart(Stage.VERIFY);
-            ApkVerifier.VerifyResult verify =
-                    new ApkVerifier().verify(signed, signingMinSdk, log);
-            if (!verify.verified) {
-                throw new PipelineException(Stage.VERIFY,
-                        "The signed APK did not pass signature verification. "
-                                + "Original APK has not been modified.");
+            ApkVerifier.VerifyResult verify = null;
+            for (int i = 0; i < signedSet.size(); i++) {
+                ApkVerifier.VerifyResult v =
+                        new ApkVerifier().verify(signedSet.get(i), signingMinSdk, log);
+                if (!v.verified) {
+                    throw new PipelineException(Stage.VERIFY, "The signed " + names.get(i)
+                            + " APK did not pass signature verification. "
+                            + "Original APK has not been modified.");
+                }
+                if (i == 0) {
+                    verify = v;
+                } else if (!v.signerSubject.equals(verify.signerSubject)) {
+                    throw new PipelineException(Stage.VERIFY, "Split " + names.get(i)
+                            + " is signed by a different certificate than the base.");
+                }
             }
             progress.onStageDone(Stage.VERIFY);
 
-            log.info("Done. Output: " + signed.getAbsolutePath());
-            return new RepackageResult(signed, req.newPackage, transform.detectedOldPackage,
+            log.info("Done. Output: " + signed.getAbsolutePath()
+                    + (signedSet.size() > 1 ? " (+ " + (signedSet.size() - 1) + " split APKs)" : ""));
+            return new RepackageResult(signed, signedSet.subList(1, signedSet.size()),
+                    req.newPackage, transform.detectedOldPackage,
                     verify, transform.manifestStringsChanged, transform.dexTypesRemapped,
                     transform.resXmlStringsChanged, conflicts, identity.description, transform.labelChanged, req.newLabel, iconsWatermarked);
         } finally {
@@ -234,9 +305,6 @@ public final class RepackageEngine {
                 ApkStorage.deleteTree(decodeDir);
                 // Keep the signed output (in outputsDir); remove the rest of the run tree.
                 ApkStorage.deleteTree(modDir);
-                File unsigned = new File(workDir, "unsigned.apk");
-                //noinspection ResultOfMethodCallIgnored
-                unsigned.delete();
                 ApkStorage.deleteTree(workDir);
                 log.info("Cleaned up temporary files.");
             } else {

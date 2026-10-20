@@ -81,7 +81,8 @@ public final class ApkAnalyzer {
 
             List<String> issues = new ArrayList<>();
             if (hasSplits) {
-                issues.add("Split APK: a full repackage requires the complete split set.");
+                issues.add("Split APK: every APK in the set is renamed and signed together, "
+                        + "and must be installed together (Install APK does this).");
             }
             if (dexCount > 1) {
                 issues.add("Multiple DEX files (" + dexCount + "): all are rewritten together.");
