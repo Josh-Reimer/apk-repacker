@@ -26,9 +26,10 @@ import com.android.tools.smali.dexlib2.writer.pool.DexPool;
 import java.io.File;
 import java.io.IOException;
 import java.util.Collections;
-import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * DEX-aware namespace rewriter built on smali/dexlib2.
@@ -47,10 +48,11 @@ public final class DexTransformer {
     private final String newPrefix; // e.g. "Lcom/example/modified/"
     private final int apiLevel;
     /** Original binary names ("com.example.original.Foo$Bar") of classes defined and renamed. */
-    private final Set<String> renamedClasses = new HashSet<>();
+    // Shared across threads: one DexTransformer rewrites many DEX files in parallel.
+    private final Set<String> renamedClasses = ConcurrentHashMap.newKeySet();
     /** Exact string constant -> replacement (see class doc); empty means strings untouched. */
     private final Map<String, String> stringRenames;
-    private int stringsRenamed;
+    private final AtomicInteger stringsRenamed = new AtomicInteger();
 
     public DexTransformer(String oldPackage, String newPackage, int minSdk) {
         this(oldPackage, newPackage, minSdk, Collections.emptyMap());
@@ -83,7 +85,7 @@ public final class DexTransformer {
                     renamedClasses.add(type.substring(1, type.length() - 1).replace('/', '.'));
                 }
                 if (!stringRenames.isEmpty()) {
-                    stringsRenamed += countStringRenames(c);
+                    stringsRenamed.addAndGet(countStringRenames(c));
                 }
             }
 
@@ -136,7 +138,7 @@ public final class DexTransformer {
 
     /** Number of string constants replaced via {@code stringRenames} so far. */
     public int stringsRenamed() {
-        return stringsRenamed;
+        return stringsRenamed.get();
     }
 
     /**

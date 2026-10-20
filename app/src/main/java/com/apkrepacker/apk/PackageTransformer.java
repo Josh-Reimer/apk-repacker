@@ -208,29 +208,45 @@ public final class PackageTransformer {
         // provider — so exactly those literals follow the manifest. Nothing else does.
         byte[] dottedNeedle = oldPackage.getBytes(java.nio.charset.StandardCharsets.UTF_8);
         DexTransformer dex = new DexTransformer(oldPackage, newPackage, minSdk, authorityRenames);
+        // DEX files are independent; rewrite them in parallel (the dominant cost for big apps).
+        List<java.util.concurrent.Callable<int[]>> dexTasks = new java.util.ArrayList<>();
         for (int a = 0; a < apks.size(); a++) {
             List<File> dexFiles = apks.get(a).dexFiles;
             List<String> dexNames = apks.get(a).dexEntryNames;
             String prefix = a == 0 ? "" : apkNames.get(a) + "!";
             for (int i = 0; i < dexFiles.size(); i++) {
-                File in = dexFiles.get(i);
-                String name = dexNames.get(i);
-                try {
-                    byte[] bytes = Files.readAllBytes(in.toPath());
+                final int apkIdx = a;
+                final File in = dexFiles.get(i);
+                final String name = dexNames.get(i);
+                dexTasks.add(() -> {
+                    byte[] bytes;
+                    try {
+                        bytes = Files.readAllBytes(in.toPath());
+                    } catch (IOException e) {
+                        throw new PipelineException(Stage.TRANSFORM,
+                                "Failed to scan " + prefix + name + ": " + e.getMessage(), e);
+                    }
                     if (!containsBytes(bytes, needle) && (authorityRenames.isEmpty()
                             || !containsBytes(bytes, dottedNeedle))) {
                         log.info("DEX " + prefix + name
                                 + ": no reference to the old package; copied as-is.");
-                        continue;
+                        return new int[]{apkIdx, 0, 0};
                     }
-                } catch (IOException e) {
-                    throw new PipelineException(Stage.TRANSFORM,
-                            "Failed to scan " + prefix + name + ": " + e.getMessage(), e);
-                }
-                File out = new File(outDirs.get(a), name);
-                totalRemapped += dex.rewrite(in, out, log);
-                replacements.get(a).put(name, out);
+                    File out = new File(outDirs.get(apkIdx), name);
+                    int n = dex.rewrite(in, out, log);
+                    synchronized (replacements) {
+                        replacements.get(apkIdx).put(name, out);
+                    }
+                    return new int[]{apkIdx, n, 1};
+                });
             }
+        }
+        if (!dexTasks.isEmpty()) {
+            log.info("Rewriting " + dexTasks.size() + " DEX file(s) across "
+                    + ParallelWork.threads(dexTasks.size()) + " thread(s).");
+        }
+        for (int[] r : ParallelWork.run(dexTasks)) {
+            totalRemapped += r[1];
         }
 
         for (Map.Entry<String, String> a : authorityRenames.entrySet()) {

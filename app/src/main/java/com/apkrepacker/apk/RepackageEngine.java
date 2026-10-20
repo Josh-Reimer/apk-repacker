@@ -268,10 +268,19 @@ public final class RepackageEngine {
                         + "Android 4.3).");
             }
             // Android requires every APK of a split set to carry the same signing certificate.
+            // Signing is CPU-bound and per-APK independent; run the set in parallel.
+            final KeystoreManager.SigningIdentity signIdentity = identity;
+            final int signSdk = signingMinSdk;
+            List<java.util.concurrent.Callable<Void>> signTasks = new java.util.ArrayList<>();
             for (int i = 0; i < inputs.size(); i++) {
-                new ApkSigner().sign(unsignedSet.get(i), signedSet.get(i), identity,
-                        signingMinSdk, log);
+                final File in = unsignedSet.get(i);
+                final File outApk = signedSet.get(i);
+                signTasks.add(() -> {
+                    new ApkSigner().sign(in, outApk, signIdentity, signSdk, log);
+                    return null;
+                });
             }
+            ParallelWork.run(signTasks);
             progress.onStageDone(Stage.SIGN);
 
             // ---- Stage: verify ----
